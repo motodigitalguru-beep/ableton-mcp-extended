@@ -1,42 +1,52 @@
-# AbletonMCP — Extended Fork (Measure · Set · Generate · Auto-fix)
+# AbletonMCP — Extended Fork (Measure · Edit · Render · Mix · Auto-fix)
 
 > **This is a fork of [ahujasid/ableton-mcp](https://github.com/ahujasid/ableton-mcp)** (MIT, © Siddharth Ahuja).
-> It keeps everything the original does and adds device-parameter read/write,
-> offline audio analysis, single-cycle wavetable export, and an autonomous
-> anti-masking chain. All credit for the original architecture goes to the
-> upstream project — please ⭐ it.
+> It keeps everything the original does and extends it to
+> **64 tools**. All credit for the original architecture
+> goes to the upstream project — please ⭐ it.
 
-AbletonMCP connects Ableton Live to an MCP client (Claude Desktop / Cursor) so
-the model can control a live set. The stock version can **build and trigger**
-things (tracks, clips, notes, load devices). This fork additionally lets the
-model **hear, set, generate and self-correct** — closing the loop
-*measure → set → re-measure*.
+AbletonMCP connects Ableton Live to an MCP client (Claude Desktop / Claude Code / Cursor)
+so the model can control a live set. The stock version can **build and trigger**
+things (tracks, clips, notes, load devices). This fork lets the model work like an
+engineer in the session: **arrange, route, automate, render, measure against
+references and self-correct** — closing the loop *measure → change → re-measure*.
+
+Built and used on real productions (techno / house), not just demos.
 
 ---
 
 ## What this fork adds
 
-| Area | Stock | This fork |
-|---|---|---|
-| Device parameters | load only | **read** (`get_device_parameters`) + **write** (`set_device_parameter`) + **delete** (`delete_device`) |
-| Audio analysis | — | `analyze_audio` (peak/RMS, bands, **LUFS**, **time-window**), `find_frequency_masking`, `analyze_mix` |
-| File formats | WAV/AIFF/FLAC | **+ m4a/mp3** (via `audioread` + `ffmpeg`) |
-| Generate | — | `extract_single_cycle` (single-cycle wavetable WAV) |
-| Audio→file bridge | — | `get_clip_sample_path`, `list_audio_clips` |
-| Mix automation | — | `auto_fix_masking` — pulls clips + mapping straight from Live, sets EQ-Eight high-pass against masking |
-| Sidechain | — | `configure_sidechain` (sets compressor values; the sidechain *switch* stays manual — Live API limit) |
-| Render/capture | — | `capture_track_to_wav` (real-time resampling) |
-| Stability | `get_track_info` could throw a C++ `TPyHandle<ASong>` error | reads run thread-safely on Live's main thread + fresh song handle |
+| Area | Tools |
+|---|---|
+| **Device parameters** | `get_device_parameters`, `set_device_parameter`, `delete_device` |
+| **Racks** | `get_rack`, `get_nested_device_parameters`, `set_nested_device_parameter`, `set_rack_chain` — reach devices inside Audio/Instrument/Drum Racks |
+| **Mixer** | `set_mixer` (fader, pan, sends, mute, solo — tracks, returns, master), `get_meters` (live output meters of every track while playing) |
+| **Routing & sidechain** | `get_routing` / `set_routing` (Audio/MIDI From/To by name), `get_device_io` / `set_device_io` (e.g. Compressor sidechain source), `configure_sidechain` |
+| **Tracks** | `create_audio_track`, `delete_track` |
+| **Arrangement** | `get_arrangement_clips`, `set_arrangement_clip`, `copy_arrangement_clip`, `delete_arrangement_clips`, `duplicate_to_arrangement`, `set_song_loop`, `set_locators` |
+| **MIDI editing** | `get_clip_notes`, `transpose_clip` (session or arrangement clips) |
+| **Automation** | `add_clip_automation`, `clear_clip_automation` — write device-parameter envelopes into clips |
+| **Samples** | `load_sample` (by browser name), `get_clip_sample_path`, `list_audio_clips`; m4a/mp3 support via `audioread` + `ffmpeg` |
+| **Render (no export dialog)** | `render_master`, `capture_section`, `capture_track_to_wav`, `render_and_measure` — real-time recording of master, bar ranges or single tracks |
+| **Analysis** | `analyze_audio` (peak/RMS, bands, **LUFS**, time windows), `find_frequency_masking`, `analyze_mix`, `measure_in_mix` (what a track really adds to the full mix) |
+| **Reference check** | `reference_check` — your render vs. pro reference tracks on the loudest 30 s (the drop): loudness, bass weight, kick punch, low-mids, mids, highs, density (PLR), true peak, stereo in the bass — traffic light per criterion |
+| **Vocal fit** | `fit_vocal` — detects key/tuning/tempo of an acapella (YIN pitch track, pure numpy/scipy) and fits it to the song: transpose, fine-tune, warp |
+| **Auto-fix** | `auto_fix_masking` — pulls clips + mapping from Live, sets EQ-Eight high-pass against masking (dry run first) |
+| **Live Set file editor** | `als_info`, `als_edit` — edits the `.als` file directly for things the Live API can't do (grouping, reordering tracks, sidechain sources, routing). Never touches the original: works on a `<Name> MCP.als` copy with backups, then reopens it |
+| **Session** | `save_set` (Cmd+S via macOS Accessibility) |
+| **Generate** | `extract_single_cycle` (single-cycle wavetable WAV) |
+| **Stability** | reads run thread-safely on Live's main thread with a fresh song handle (fixes the upstream `TPyHandle<ASong>` error) |
 
-### ⚠️ Experimental (not yet confirmed in a live Ableton session)
-`capture_track_to_wav`, `delete_device`, and the `get_track_info` thread-safety
-fix are implemented and import-clean, but the live-operation behaviour still
-needs real-world testing. The offline analysis/generation tools are verified.
+### Extras outside the MCP server
+
+- **`tools/`** — standalone helpers: `wavetable_gen.py` (wavetables for Ableton Wavetable or Serum/Vital), `fx_generator.py` (tempo-synced, key-tuned FX starter pack), `fx_index.py` (catalogue an FX library by length, key, loudness, type), `make_template.py` (teaching template from a finished set), `bass_fingerprint.py`, `live.py` (direct socket client for scripting).
+- **`m4l/`** — `build_lek.py` builds two Max for Live devices, **LEK Kick** + **LEK Bass** ("low-end coupling"): the bass ducks only its sub band exactly on the kick grid, with lookahead, read from the kick clips in the set.
 
 ### Honest API limitations (not bugs — unavailable in the Live Object Model)
-- No offline render/bounce/freeze → `capture_track_to_wav` uses **real-time** resampling; manual `File > Export Audio` remains the pragmatic fallback.
-- No device **reorder** (only delete) → load devices in the order you want (they append to the chain end).
-- Compressor **Sidechain** switch + "Audio From" source can't be set.
+- No offline render/bounce/freeze → all renders are **real-time** recordings.
+- No device **reorder** via the API → load devices in order, or use `als_edit` on the file.
+- Grouping tracks isn't exposed by the API → `als_edit`.
 - **Wavetable** custom-file import can't be triggered (drag it in manually).
 - VST/AU **"Configure"** can't be clicked to expose parameters.
 
@@ -86,12 +96,22 @@ Restart Claude Desktop — you should see the AbletonMCP tools (hammer icon).
 
 ---
 
-## Typical workflow
-1. Have audio clips in the set (or Freeze+Flatten instrument tracks first).
-2. `analyze_mix` (no args) → pulls clips + builds the mapping from Live, ranks masking conflicts.
-3. `auto_fix_masking` (dry run) → review the plan → run again with `apply=true`.
-4. `capture_track_to_wav` or manual export → `analyze_mix` again to verify.
-5. Always trust your ears — the recommendations are starting points.
+## Typical workflows
+
+**Mix check against references**
+1. `render_master` (or `render_and_measure` for a bar range).
+2. `reference_check` with 1–3 pro tracks → traffic light per criterion.
+3. Fix with `set_mixer`, `set_device_parameter`, `set_nested_device_parameter`, re-render, re-check.
+
+**Masking**
+1. `analyze_mix` (no args) → pulls clips + mapping from Live, ranks masking conflicts.
+2. `auto_fix_masking` (dry run) → review → run again with `apply=true`.
+3. `measure_in_mix` to confirm what the track now adds to the full mix.
+
+**Vocal into a track**
+1. `load_sample` the acapella → `fit_vocal` → key, tuning and tempo matched.
+
+Always trust your ears — the numbers are starting points.
 
 ---
 

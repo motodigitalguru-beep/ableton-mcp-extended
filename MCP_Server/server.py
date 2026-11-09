@@ -297,17 +297,19 @@ def get_session_info(ctx: Context, user_prompt: str = "") -> str:
 
 @mcp.tool()
 @telemetry_tool("get_track_info")
-def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+def get_track_info(ctx: Context, track_index: int, track_type: str = "track", user_prompt: str = "") -> str:
     """
-    Get detailed information about a specific track in Ableton.
+    Get detailed information about a specific track in Ableton, incl. mixer
+    (volume/sends with dB display), group membership and devices.
 
     Parameters:
     - track_index: The index of the track to get information about
+    - track_type: "track" (default), "return" or "master" (master: index 0)
     - user_prompt: The original user prompt that led to this tool call (for telemetry)
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("get_track_info", {"track_index": track_index})
+        result = ableton.send_command("get_track_info", {"track_index": track_index, "track_type": track_type})
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
@@ -371,7 +373,7 @@ def list_audio_clips(ctx: Context, user_prompt: str = "") -> str:
 
 @mcp.tool()
 @telemetry_tool("get_device_parameters")
-def get_device_parameters(ctx: Context, track_index: int, device_index: int, user_prompt: str = "") -> str:
+def get_device_parameters(ctx: Context, track_index: int, device_index: int, track_type: str = "track", user_prompt: str = "") -> str:
     """
     List every parameter of a device (instrument or effect) on a track.
 
@@ -394,6 +396,7 @@ def get_device_parameters(ctx: Context, track_index: int, device_index: int, use
         result = ableton.send_command("get_device_parameters", {
             "track_index": track_index,
             "device_index": device_index,
+            "track_type": track_type,
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -409,6 +412,7 @@ def set_device_parameter(
     value: float,
     param_index: int | None = None,
     param_name: str | None = None,
+    track_type: str = "track",
     user_prompt: str = ""
 ) -> str:
     """
@@ -442,6 +446,7 @@ def set_device_parameter(
             "param_index": param_index,
             "param_name": param_name,
             "value": value,
+            "track_type": track_type,
         })
         name = result.get("parameter_name", "parameter")
         applied = result.get("value")
@@ -619,7 +624,7 @@ def set_tempo(ctx: Context, tempo: float, user_prompt: str = "") -> str:
 
 @mcp.tool()
 @rich_telemetry_tool("load_instrument_or_effect")
-def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, user_prompt: str = "") -> str:
+def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, track_type: str = "track", user_prompt: str = "") -> str:
     """
     Load an instrument or effect onto a track using its URI.
 
@@ -632,7 +637,8 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str, user_pro
         ableton = get_ableton_connection()
         result = ableton.send_command("load_browser_item", {
             "track_index": track_index,
-            "item_uri": uri
+            "item_uri": uri,
+            "track_type": track_type,
         })
         
         # Check if the instrument was loaded successfully
@@ -1530,6 +1536,938 @@ def capture_track_to_wav(
     except Exception as e:
         logger.error(f"Error capturing track: {str(e)}")
         return f"Error capturing track: {str(e)}"
+
+
+# ── Mixer / Arrangement-Werkzeuge (2026-10-14) ─────────────────────────────
+def _cmd(name: str, params: dict) -> str:
+    try:
+        ableton = get_ableton_connection()
+        return json.dumps(ableton.send_command(name, params), indent=2)
+    except Exception as e:
+        logger.error(f"Error in {name}: {str(e)}")
+        return f"Error in {name}: {str(e)}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_mixer")
+def set_mixer(ctx: Context, track_index: int, track_type: str = "track",
+              volume: float | None = None, panning: float | None = None,
+              sends: list[float | None] | None = None,
+              mute: bool | None = None, solo: bool | None = None,
+              user_prompt: str = "") -> str:
+    """
+    Set fader, pan, sends, mute and solo of a track, return track or the master.
+
+    Values are Live's raw mixer values: volume 0.0-1.0 where 0.85 = 0 dB
+    (the response reports the dB value actually set — read it and adjust),
+    panning -1..1, sends 0.0-1.0 per return (0.0 = -inf). Unchanged fields: omit.
+
+    Parameters:
+    - track_index: index within the chosen collection (master: 0)
+    - track_type: "track" (default), "return" or "master"
+    - volume: fader value (0.85 = 0 dB)
+    - panning: -1 (L) .. 1 (R)
+    - sends: list in return order, e.g. [0.0, null] sets send A to -inf, leaves B
+    - mute / solo: true/false (not for master)
+    """
+    params = {"track_index": track_index, "track_type": track_type}
+    for k, v in (("volume", volume), ("panning", panning), ("sends", sends), ("mute", mute), ("solo", solo)):
+        if v is not None:
+            params[k] = v
+    return _cmd("set_mixer", params)
+
+
+@mcp.tool()
+@telemetry_tool("set_song_loop")
+def set_song_loop(ctx: Context, loop: bool | None = None, start: float | None = None,
+                  length: float | None = None, song_time: float | None = None,
+                  user_prompt: str = "") -> str:
+    """
+    Set the arrangement loop (start/length in beats; 4 beats = 1 bar in 4/4),
+    switch it on/off and/or move the playhead. capture_track_to_wav records
+    inside the active loop, so set the loop to the section you want to measure.
+    """
+    params = {k: v for k, v in (("loop", loop), ("start", start), ("length", length), ("song_time", song_time)) if v is not None}
+    return _cmd("set_song_loop", params)
+
+
+@mcp.tool()
+@rich_telemetry_tool("create_audio_track")
+def create_audio_track(ctx: Context, index: int = -1, user_prompt: str = "") -> str:
+    """Create a new audio track (index -1 = end of list)."""
+    return _cmd("create_audio_track", {"index": index})
+
+
+@mcp.tool()
+@rich_telemetry_tool("delete_track")
+def delete_track(ctx: Context, track_index: int, user_prompt: str = "") -> str:
+    """Delete a track. Irreversible via the API — confirm with the user first."""
+    return _cmd("delete_track", {"track_index": track_index})
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_arrangement_clip")
+def set_arrangement_clip(ctx: Context, track_index: int, arrangement_index: int,
+                         name: str | None = None, looping: bool | None = None,
+                         loop_end: float | None = None, end_marker: float | None = None,
+                         muted: bool | None = None, user_prompt: str = "") -> str:
+    """
+    Adjust an arrangement clip (arrangement_index = position in get_arrangement_clips).
+    Shorten a clip by setting end_marker (and loop_end) in clip beats; mute with muted.
+    """
+    params = {"track_index": track_index, "arrangement_index": arrangement_index}
+    for k, v in (("name", name), ("looping", looping), ("loop_end", loop_end), ("end_marker", end_marker), ("muted", muted)):
+        if v is not None:
+            params[k] = v
+    return _cmd("set_arrangement_clip", params)
+
+
+@mcp.tool()
+@rich_telemetry_tool("delete_arrangement_clips")
+def delete_arrangement_clips(ctx: Context, track_index: int, start: float | None = None,
+                             end: float | None = None, user_prompt: str = "") -> str:
+    """Delete arrangement clips of a track whose start lies in [start, end) beats (all if omitted)."""
+    params = {"track_index": track_index}
+    if start is not None: params["start"] = start
+    if end is not None: params["end"] = end
+    return _cmd("delete_arrangement_clips", params)
+
+
+@mcp.tool()
+@telemetry_tool("get_clip_notes")
+def get_clip_notes(ctx: Context, track_index: int, clip_index: int = 0,
+                   arrangement_index: int | None = None, user_prompt: str = "") -> str:
+    """Read the MIDI notes of a session clip (clip_index) or arrangement clip (arrangement_index)."""
+    return _cmd("get_clip_notes", {"track_index": track_index, "clip_index": clip_index,
+                                   "arrangement_index": arrangement_index})
+
+
+@mcp.tool()
+@rich_telemetry_tool("transpose_clip")
+def transpose_clip(ctx: Context, track_index: int, semitones: int, clip_index: int = 0,
+                   arrangement_index: int | None = None, user_prompt: str = "") -> str:
+    """Transpose all notes of a MIDI clip (session clip_index or arrangement_index) by semitones."""
+    return _cmd("transpose_clip", {"track_index": track_index, "clip_index": clip_index,
+                                   "arrangement_index": arrangement_index, "semitones": semitones})
+
+
+# ── Ausbau 2026-10-14: Messen, Racks, Routing, Arrangement, Export ─────────
+def _send(name: str, params: dict | None = None) -> dict:
+    return get_ableton_connection().send_command(name, params or {})
+
+
+def _capture_range(start_bar: float, end_bar: float, source_track_index: int | None = None,
+                   mute_tracks: list[int] | None = None) -> dict:
+    """Nimmt den Master in Echtzeit auf: Loop temporär auf [start_bar, end_bar), Start dort.
+    Takte 1-basiert (Takt 1 = Beat 0, 4/4). Stellt den alten Loop danach wieder her."""
+    import time
+    info = _send("get_session_info")
+    beats_per_bar = float(info.get("signature_numerator", 4))
+    start = (float(start_bar) - 1.0) * beats_per_bar
+    length = max(beats_per_bar, (float(end_bar) - float(start_bar)) * beats_per_bar)
+    old = {"loop": info.get("loop"), "start": info.get("loop_start"), "length": info.get("loop_length")}
+    _send("set_song_loop", {"loop": True, "start": start, "length": length, "song_time": start})
+    seconds = length * 60.0 / float(info.get("tempo", 120.0))
+    try:
+        st = _send("start_resample_capture", {"source_track_index": source_track_index,
+                                              "start_time": start, "mute_tracks": mute_tracks or []})
+        # Live startet u. U. am Insert-Marker statt an der gesetzten Position (z. B. nach
+        # Absturz-Wiederherstellung). Ein Sprung als eigener Befehl im laufenden Transport greift.
+        _send("set_song_loop", {"song_time": start})
+        time.sleep(min(seconds + 0.3, 600.0))
+        sp = _send("stop_resample_capture", {"capture_track_index": st.get("capture_track_index"),
+                                             "source_track_index": source_track_index})
+    finally:
+        try:
+            _send("set_song_loop", old)
+        except Exception:
+            pass
+    return {"seconds": round(seconds, 2), "start_beat": start, "length_beats": length,
+            "capture": st, "file_path": sp.get("file_path")}
+
+
+def _measure_file(path: str) -> dict:
+    """Lautheit, True Peak (4x), Crest und Bänder einer Aufnahme."""
+    import numpy as np
+    import soundfile as sf
+    x, sr = sf.read(path, always_2d=True)
+    m = x.mean(axis=1)
+    out = {"duration_s": round(len(m) / sr, 2)}
+    if np.max(np.abs(x)) < 1e-6:
+        out["silent"] = True
+        return out
+    pk = float(np.max(np.abs(x)))
+    rms = float(np.sqrt(np.mean(m ** 2)))
+    out["peak_dbfs"] = round(20 * np.log10(pk), 2)
+    out["rms_dbfs"] = round(20 * np.log10(rms + 1e-12), 2)
+    out["crest_db"] = round(out["peak_dbfs"] - out["rms_dbfs"], 1)
+    try:
+        import pyloudnorm as pyln
+        out["integrated_lufs"] = round(float(pyln.Meter(sr).integrated_loudness(x)), 2)
+    except Exception:
+        out["integrated_lufs"] = None
+    # True Peak über 4x-Oversampling (FFT) des lautesten 10-s-Abschnitts je Kanal
+    i = int(np.argmax(np.abs(m)))
+    a, b = max(0, i - 5 * sr), min(len(m), i + 5 * sr)
+    tp = 0.0
+    for c in range(x.shape[1]):
+        v = x[a:b, c]
+        V = np.fft.rfft(v)
+        N = len(v) * 4
+        W = np.zeros(N // 2 + 1, complex)
+        W[:len(V)] = V
+        tp = max(tp, float(np.max(np.abs(np.fft.irfft(W, N) * 4))))
+    out["true_peak_dbtp"] = round(20 * np.log10(tp + 1e-12), 2)
+    if x.shape[1] == 2:
+        L, R = x[:, 0], x[:, 1]
+        out["side_to_mid_db"] = round(20 * np.log10(np.std(L - R) / (np.std(L + R) + 1e-12) + 1e-12), 1)
+    bands = [(20, 60), (60, 120), (120, 250), (250, 500), (500, 2000), (2000, 6000), (6000, 16000)]
+    F = np.abs(np.fft.rfft(m * np.hanning(len(m)))) ** 2
+    fr = np.fft.rfftfreq(len(m), 1 / sr)
+    tot = F.sum() + 1e-20
+    out["bands_db"] = {f"{lo}-{hi}": round(float(10 * np.log10(F[(fr >= lo) & (fr < hi)].sum() / tot + 1e-12)), 1)
+                       for lo, hi in bands}
+    return out
+
+
+def _content_end_bar() -> float:
+    """Letzter Takt mit Inhalt im Arrangement (über alle Spuren, ohne MCP Capture)."""
+    info = _send("get_session_info")
+    end = 0.0
+    for i in range(int(info.get("track_count", 0))):
+        ti = _send("get_track_info", {"track_index": i})
+        if ti.get("name") == "MCP Capture" or ti.get("is_group"):
+            continue
+        try:
+            clips = _send("get_arrangement_clips", {"track_index": i}).get("clips", [])
+        except Exception:
+            continue
+        for c in clips:
+            end = max(end, float(c.get("end_time", 0.0)))
+    return end / float(info.get("signature_numerator", 4)) + 1.0
+
+
+def _render_master(start_bar: float = 1.0, end_bar: float | None = None, name: str | None = None,
+                   formats: str = "wav,flac,mp3", out_dir: str | None = None, allow_solo: bool = False,
+                   keep_overrides: bool = False) -> dict:
+    """Eigener Renderer: Arrangement-Aufnahme des Masters in Echtzeit, taktgenau zugeschnitten,
+    als WAV 24 Bit / FLAC / MP3 320 geschrieben und nachgemessen."""
+    import time, subprocess
+    import numpy as np
+    import soundfile as sf
+    from MCP_Server import als_editor as A
+    info = _send("get_session_info")
+    bpb = float(info.get("signature_numerator", 4)); tempo = float(info.get("tempo", 120.0))
+    n = int(info.get("track_count", 0))
+    tracks = [_send("get_track_info", {"track_index": i}) for i in range(n)]
+    solos = [t.get("name") for t in tracks if t.get("solo")]
+    if solos and not allow_solo:
+        raise RuntimeError("Solo aktiv auf %s – Render abgebrochen (allow_solo=True zum Erzwingen)" % solos)
+    if not keep_overrides:   # Achtung: "Zurück zum Arrangement" aktiviert übersteuerte Automation wieder (z. B. Master-Fader)
+        try:
+            _send("transport_state", {"back_to_arranger": True, "re_enable_automation": False})
+        except Exception:
+            pass
+    if end_bar is None:
+        end_bar = _content_end_bar() + 1.0          # 1 Takt Ausklang
+    s = (float(start_bar) - 1.0) * bpb; e = (float(end_bar) - 1.0) * bpb
+    pre = 2 * bpb if s >= 2 * bpb else 0.0   # Vorlauf: Punch-in muss vor dem Starttakt liegen
+    secs = (e - s) * 60.0 / tempo
+    first = (s - pre) < 0.01
+    cap_i = next((i for i, t in enumerate(tracks) if t.get("name") == "MCP Capture"), None)
+    if cap_i is not None:   # Altlasten weg + Ausgang stumm: liegengebliebene Takes dürfen nie mitspielen
+        _send("delete_arrangement_clips", {"track_index": cap_i})
+        _send("set_routing", {"track_index": cap_i, "output_type": "Sends Only"})
+    st0 = _send("arrangement_record", {"action": "start", "start_beat": s - pre, "punch_first": first})
+    cap_i = st0.get("capture_track_index", cap_i)
+    _send("set_routing", {"track_index": cap_i, "output_type": "Sends Only"})
+    try:
+        for _ in range(0 if first else 30):
+            cur = float(_send("get_session_info").get("current_song_time", -1))
+            if s - pre - 0.5 <= cur <= s - pre + 2.0:
+                break
+            _send("arrangement_record", {"action": "seek", "start_beat": s - pre}); time.sleep(0.15)
+        else:
+            if not first:
+                raise RuntimeError("Abspielposition lässt sich nicht setzen")
+        if not first:
+            _send("arrangement_record", {"action": "punch"})
+        t_end = time.time() + (e - s + pre) * 60.0 / tempo + 0.6
+        while time.time() < t_end:
+            time.sleep(0.5)
+    finally:
+        _send("arrangement_record", {"action": "stop", "cleanup": False})
+    time.sleep(1.0)   # Live stellt den Clip erst nach dem Stopp fertig
+    clips = _send("get_arrangement_clips", {"track_index": cap_i}).get("clips", [])
+    takes = []
+    for ai in range(len(clips)):
+        cp = _send("clip_props", {"track_index": cap_i, "arrangement_index": ai})
+        fp = cp.get("file_path")
+        if fp and os.path.exists(fp):
+            dur = sf.info(fp).duration * tempo / 60.0
+            takes.append({"file_path": fp, "start_time": float(cp.get("start_time", 0.0)),
+                          "end_time": float(cp.get("start_time", 0.0)) + dur})
+    _send("delete_arrangement_clips", {"track_index": cap_i})
+    take = None
+    for c in takes:
+        if c["start_time"] <= s + 0.01 and c["end_time"] >= e - 0.01:
+            take = c
+    if not take:
+        raise RuntimeError("Kein durchgehender Take gefunden: %s" % takes)
+    x, sr = sf.read(take["file_path"], always_2d=True)
+    off = int(round((s - float(take["start_time"])) * 60.0 / tempo * sr))
+    y = x[off:off + int(round(secs * sr))]
+    set_path = A.current_set_path() or ""
+    proj = os.path.dirname(set_path) if set_path else os.path.expanduser("~/Desktop")
+    out_dir = out_dir or os.path.join(proj, "Renders")
+    os.makedirs(out_dir, exist_ok=True)
+    base = name or ("%s Master %s" % (os.path.splitext(os.path.basename(set_path))[0].strip() or "Render",
+                                      time.strftime("%Y-%m-%d %H%M")))
+    files = {}
+    fm = [f.strip().lower() for f in formats.split(",") if f.strip()]
+    if "wav" in fm:
+        files["wav"] = os.path.join(out_dir, base + ".wav"); sf.write(files["wav"], y, sr, subtype="PCM_24")
+    if "flac" in fm:
+        files["flac"] = os.path.join(out_dir, base + ".flac"); sf.write(files["flac"], y, sr, subtype="PCM_24")
+    if "mp3" in fm:
+        src = files.get("wav") or files.get("flac")
+        if not src:
+            src = os.path.join(out_dir, base + ".tmp.wav"); sf.write(src, y, sr, subtype="PCM_24")
+        files["mp3"] = os.path.join(out_dir, base + ".mp3")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-codec:a", "libmp3lame", "-b:a", "320k", files["mp3"]], check=True)
+        if src.endswith(".tmp.wav"):
+            os.remove(src)
+    meas = _measure_file(files.get("wav") or files.get("flac"))
+    return {"start_bar": start_bar, "end_bar": end_bar, "seconds": round(len(y) / sr, 2),
+            "stereo": y.shape[1] == 2, "files": files, "measure": meas, "take": take["file_path"],
+            "solo_at_start": solos}
+
+
+@mcp.tool()
+@rich_telemetry_tool("render_master")
+def render_master(ctx: Context, start_bar: float = 1.0, end_bar: float | None = None, name: str | None = None,
+                  formats: str = "wav,flac,mp3", allow_solo: bool = False, user_prompt: str = "") -> str:
+    """
+    Our own master render (no Ableton export dialog): records the master in real time as one
+    continuous ARRANGEMENT take via resampling, trims it bar-exactly and writes WAV 24-bit / FLAC /
+    MP3 320 to <project>/Renders, then measures it (LUFS, true peak, stereo, bands).
+    end_bar omitted = end of arrangement content + 1 bar. Aborts if a track is soloed.
+    Runs in real time (song length).
+    """
+    try:
+        return json.dumps(_render_master(start_bar, end_bar, name, formats, None, allow_solo), indent=2, default=str)
+    except Exception as e:
+        logger.error(f"render_master: {e}")
+        return f"Error in render_master: {e}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("reference_check")
+def reference_check(ctx: Context, target_path: str, reference_paths: list[str], user_prompt: str = "") -> str:
+    """
+    Compare a render against professional reference tracks (loudest 30 s of each = drop):
+    loudness, bass weight, hum before next kick, kick punch, band balance, density, true peak,
+    bass stereo. Returns a traffic-light table (🟢/🟡/🔴) plus raw numbers.
+    """
+    try:
+        from MCP_Server import reference_check as RC
+        res = RC.compare(target_path, reference_paths)
+        return RC.as_table(res) + "\n\n" + json.dumps({"target": res["target_raw"], "refs": res["refs_raw"]}, indent=1)
+    except Exception as e:
+        logger.error(f"reference_check: {e}")
+        return f"Error in reference_check: {e}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("capture_section")
+def capture_section(ctx: Context, start_bar: float, end_bar: float, track_index: int | None = None,
+                    user_prompt: str = "") -> str:
+    """
+    Record a section of the arrangement (bars, 1-based, end exclusive) in real time
+    and measure it: LUFS, true peak, crest, stereo, bands. No user loop setup needed —
+    the loop is set temporarily and restored afterwards.
+
+    - track_index omitted: the full master mix is recorded.
+    - track_index given: that track is SOLOED (fast, but sidechain effects keyed
+      from muted tracks behave differently — use measure_in_mix for those).
+    """
+    try:
+        cap = _capture_range(start_bar, end_bar, source_track_index=track_index)
+        if cap.get("file_path"):
+            cap["measure"] = _measure_file(cap["file_path"])
+        return json.dumps(cap, indent=2)
+    except Exception as e:
+        logger.error(f"capture_section: {e}")
+        return f"Error in capture_section: {e}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("measure_in_mix")
+def measure_in_mix(ctx: Context, track_index: int, start_bar: float, end_bar: float,
+                   user_prompt: str = "") -> str:
+    """
+    Measure what a track really contributes to the mix: records the full mix, then the
+    mix with that track MUTED (no solo, so sidechains keep working), and reports the
+    per-band energy difference in dB (how much louder each band is WITH the track).
+    Takes 2x the section length in real time.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+        full = _capture_range(start_bar, end_bar)
+        p_full = full.get("file_path")
+        x_full = sf.read(p_full, always_2d=True)[0].copy() if p_full else None
+        without = _capture_range(start_bar, end_bar, mute_tracks=[track_index])
+        p_wo = without.get("file_path")
+        if not (p_full and p_wo):
+            return json.dumps({"error": "capture file missing — save the Set and retry", "full": full, "without": without})
+        sr = sf.info(p_wo).samplerate
+        x_wo = sf.read(p_wo, always_2d=True)[0]
+        n = min(len(x_full), len(x_wo))
+        bands = [(20, 60), (60, 120), (120, 250), (250, 500), (500, 2000), (2000, 6000), (6000, 16000)]
+        def be(x):
+            mm = x[:n].mean(axis=1)
+            F = np.abs(np.fft.rfft(mm * np.hanning(n))) ** 2
+            fr = np.fft.rfftfreq(n, 1 / sr)
+            return [float(F[(fr >= lo) & (fr < hi)].sum()) for lo, hi in bands]
+        ef, ew = be(x_full), be(x_wo)
+        contrib = {f"{lo}-{hi}": round(10 * np.log10((a + 1e-20) / (b + 1e-20)), 2)
+                   for (lo, hi), a, b in zip(bands, ef, ew)}
+        rms = lambda x: 20 * np.log10(np.sqrt(np.mean(x[:n].mean(axis=1) ** 2)) + 1e-12)
+        return json.dumps({"track_index": track_index,
+                           "mix_rms_db": round(float(rms(x_full)), 2),
+                           "mix_without_rms_db": round(float(rms(x_wo)), 2),
+                           "band_gain_with_track_db": contrib,
+                           "full_mix": _measure_file(p_full)}, indent=2)
+    except Exception as e:
+        logger.error(f"measure_in_mix: {e}")
+        return f"Error in measure_in_mix: {e}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("render_and_measure")
+def render_and_measure(ctx: Context, start_bar: float, end_bar: float, user_prompt: str = "") -> str:
+    """Render the full master mix of a bar range in real time and report integrated LUFS,
+    true peak (dBTP), crest, stereo width and bands — the loudness check for mastering."""
+    return capture_section(ctx, start_bar, end_bar, None, user_prompt)
+
+
+@mcp.tool()
+@telemetry_tool("get_meters")
+def get_meters(ctx: Context, seconds: float = 4.0, interval: float = 0.1, user_prompt: str = "") -> str:
+    """
+    Read the live output meters of ALL tracks, returns and master while Live is playing
+    (start playback first). Polls for `seconds` and reports the max (peak hold) per track
+    in dB (Live meter scale, close to dBFS peak). Fast overview without recording.
+    """
+    try:
+        import time
+        hold = {}
+        t_end = time.time() + max(0.2, min(float(seconds), 60.0))
+        playing = False
+        while time.time() < t_end:
+            r = _send("get_meters")
+            playing = playing or r.get("playing", False)
+            for row in r.get("meters", []):
+                key = (row["type"], row["index"])
+                v = max(row.get("left") or 0.0, row.get("right") or 0.0)
+                if key not in hold or v > hold[key]["max"]:
+                    hold[key] = {"type": row["type"], "index": row["index"], "name": row["name"], "max": v}
+            time.sleep(max(0.03, float(interval)))
+        import math
+        rows = sorted(hold.values(), key=lambda r: -r["max"])
+        for r in rows:
+            r["peak_db"] = round(20 * math.log10(r["max"]), 1) if r["max"] > 0 else None
+            del r["max"]
+        return json.dumps({"playing": playing, "meters": rows}, indent=2)
+    except Exception as e:
+        return f"Error in get_meters: {e}"
+
+
+@mcp.tool()
+@telemetry_tool("get_rack")
+def get_rack(ctx: Context, track_index: int, device_path: list[int], track_type: str = "track",
+             user_prompt: str = "") -> str:
+    """
+    Show the inside of a rack (Audio/Instrument/Drum Rack): chains (mute/solo/volume)
+    and their devices, recursively. device_path: [device_index] for a rack on the track,
+    or [device_index, chain_index, device_index, ...] for nested racks.
+    """
+    return _cmd("get_rack", {"track_index": track_index, "device_path": device_path, "track_type": track_type})
+
+
+@mcp.tool()
+@telemetry_tool("get_nested_device_parameters")
+def get_nested_device_parameters(ctx: Context, track_index: int, device_path: list[int],
+                                 track_type: str = "track", user_prompt: str = "") -> str:
+    """List parameters of a device inside a rack. device_path e.g. [4, 0, 1] = device 4
+    on the track (a rack) -> chain 0 -> device 1 in that chain."""
+    return _cmd("get_nested_device_parameters", {"track_index": track_index, "device_path": device_path,
+                                                 "track_type": track_type})
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_nested_device_parameter")
+def set_nested_device_parameter(ctx: Context, track_index: int, device_path: list[int], value: float,
+                                param_index: int | None = None, param_name: str | None = None,
+                                track_type: str = "track", user_prompt: str = "") -> str:
+    """Set a parameter of a device inside a rack (see get_rack for the path). Value is clamped."""
+    return _cmd("set_nested_device_parameter", {"track_index": track_index, "device_path": device_path,
+                                                "value": value, "param_index": param_index,
+                                                "param_name": param_name, "track_type": track_type})
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_rack_chain")
+def set_rack_chain(ctx: Context, track_index: int, device_path: list[int], chain_index: int,
+                   mute: bool | None = None, solo: bool | None = None, volume: float | None = None,
+                   track_type: str = "track", user_prompt: str = "") -> str:
+    """Mute/solo/volume (0.85 = 0 dB) of one chain in a rack."""
+    p = {"track_index": track_index, "device_path": device_path, "chain_index": chain_index, "track_type": track_type}
+    for k, v in (("mute", mute), ("solo", solo), ("volume", volume)):
+        if v is not None:
+            p[k] = v
+    return _cmd("set_rack_chain", p)
+
+
+@mcp.tool()
+@telemetry_tool("get_device_io")
+def get_device_io(ctx: Context, track_index: int, device_path: list[int], track_type: str = "track",
+                  user_prompt: str = "") -> str:
+    """Read a device's sidechain / audio I/O routing (e.g. Compressor 'Audio From'),
+    if Live exposes it for that device. 'supported': false means set it by hand."""
+    return _cmd("get_device_io", {"track_index": track_index, "device_path": device_path, "track_type": track_type})
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_device_io")
+def set_device_io(ctx: Context, track_index: int, device_path: list[int], routing_type: str | None = None,
+                  routing_channel: str | None = None, io_index: int = 0, track_type: str = "track",
+                  user_prompt: str = "") -> str:
+    """Set a device's sidechain source by name, e.g. routing_type='02 KICK TRIGGER',
+    routing_channel='Pre FX' (names as listed by get_device_io; partial match allowed)."""
+    p = {"track_index": track_index, "device_path": device_path, "io_index": io_index, "track_type": track_type}
+    if routing_type: p["routing_type"] = routing_type
+    if routing_channel: p["routing_channel"] = routing_channel
+    return _cmd("set_device_io", p)
+
+
+@mcp.tool()
+@telemetry_tool("get_routing")
+def get_routing(ctx: Context, track_index: int, track_type: str = "track", user_prompt: str = "") -> str:
+    """Read a track's Audio/MIDI From, Audio To (incl. available options) and monitoring state."""
+    return _cmd("get_routing", {"track_index": track_index, "track_type": track_type})
+
+
+@mcp.tool()
+@rich_telemetry_tool("set_routing")
+def set_routing(ctx: Context, track_index: int, input_type: str | None = None, input_channel: str | None = None,
+                output_type: str | None = None, output_channel: str | None = None,
+                monitoring: str | None = None, track_type: str = "track", user_prompt: str = "") -> str:
+    """Set a track's routing by display name (partial match), e.g. input_type='01 KICK 2',
+    input_channel='Post FX', output_type='LOWEnd Bus' or 'Sends Only', monitoring='In'|'Auto'|'Off'."""
+    p = {"track_index": track_index, "track_type": track_type}
+    for k, v in (("input_type", input_type), ("input_channel", input_channel), ("output_type", output_type),
+                 ("output_channel", output_channel), ("monitoring", monitoring)):
+        if v is not None:
+            p[k] = v
+    return _cmd("set_routing", p)
+
+
+@mcp.tool()
+@rich_telemetry_tool("copy_arrangement_clip")
+def copy_arrangement_clip(ctx: Context, track_index: int, arrangement_index: int, destination_time: float,
+                          move: bool = False, user_prompt: str = "") -> str:
+    """Copy an arrangement clip to another beat position on the same track (move=True deletes
+    the original). Combine with set_arrangement_clip(end_marker=...) to cut short throws."""
+    return _cmd("copy_arrangement_clip", {"track_index": track_index, "arrangement_index": arrangement_index,
+                                          "destination_time": destination_time, "move": move})
+
+
+@mcp.tool()
+@rich_telemetry_tool("add_clip_automation")
+def add_clip_automation(ctx: Context, track_index: int, points: list[list[float]],
+                        device_index: int | None = None, param_index: int | None = None,
+                        param_name: str | None = None, clip_index: int = 0,
+                        arrangement_index: int | None = None, mode: str = "ramp",
+                        resolution: float = 0.25, mixer: str | None = None,
+                        user_prompt: str = "") -> str:
+    """
+    Write automation into a clip (session clip_index or arrangement_index) for a device
+    parameter (device_index + param_index/param_name) or a mixer control (mixer='volume'|'panning'|'send_0'...).
+    points: [[beat_in_clip, value], ...] in the parameter's own units; mode 'ramp' draws
+    linear ramps (filter sweeps, fades), 'step' holds values.
+    """
+    p = {"track_index": track_index, "points": points, "clip_index": clip_index, "mode": mode,
+         "resolution": resolution}
+    for k, v in (("device_index", device_index), ("param_index", param_index), ("param_name", param_name),
+                 ("arrangement_index", arrangement_index), ("mixer", mixer)):
+        if v is not None:
+            p[k] = v
+    return _cmd("add_clip_automation", p)
+
+
+@mcp.tool()
+@rich_telemetry_tool("clear_clip_automation")
+def clear_clip_automation(ctx: Context, track_index: int, device_index: int | None = None,
+                          param_index: int | None = None, param_name: str | None = None,
+                          clip_index: int = 0, arrangement_index: int | None = None,
+                          mixer: str | None = None, user_prompt: str = "") -> str:
+    """Remove a clip's automation envelope for one parameter."""
+    p = {"track_index": track_index, "clip_index": clip_index}
+    for k, v in (("device_index", device_index), ("param_index", param_index), ("param_name", param_name),
+                 ("arrangement_index", arrangement_index), ("mixer", mixer)):
+        if v is not None:
+            p[k] = v
+    return _cmd("clear_clip_automation", p)
+
+
+@mcp.tool()
+@rich_telemetry_tool("load_sample")
+def load_sample(ctx: Context, track_index: int, file_name: str, user_prompt: str = "") -> str:
+    """Load an audio file by its file name (as it appears in Live's browser: Current Project,
+    Samples, User Library, added User Folders) onto a track. On a MIDI track this creates a
+    Simpler with the sample. Tip: copy the file into the project's Samples/Imported first."""
+    return _cmd("load_sample_file", {"track_index": track_index, "file_name": file_name})
+
+
+@mcp.tool()
+@rich_telemetry_tool("save_set")
+def save_set(ctx: Context, user_prompt: str = "") -> str:
+    """Save the current Live Set (sends Cmd+S to Ableton Live via macOS Accessibility).
+    Needs Accessibility permission for the app running this server."""
+    import subprocess
+    script = ('tell application "System Events" to set p to name of first process whose name starts with "Live"\n'
+              'tell application p to activate\n'
+              'delay 0.3\n'
+              'tell application "System Events" to keystroke "s" using command down')
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return ("Error saving: " + (r.stderr.strip() or "osascript failed") +
+                " — grant Accessibility (System Settings > Privacy & Security > Accessibility) to the host app.")
+    return "Saved (Cmd+S sent to Live)."
+
+
+# ── Projektdatei-Editor (.als) — alles, was die Live-API sperrt ────────────
+@mcp.tool()
+@telemetry_tool("als_info")
+def als_info(ctx: Context, path: str | None = None, user_prompt: str = "") -> str:
+    """
+    Read the structure of the CURRENT Live Set file (or `path`): tracks in order with
+    API index, group membership, devices (plugin names), audio input/output routing and
+    every device sidechain source. Reads the saved file — save in Live first for fresh state.
+    """
+    try:
+        from MCP_Server import als_editor as A
+        src = path or A.current_set_path()
+        return json.dumps({"path": src, **A.info(A.load(src))}, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"Error in als_info: {e}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("als_edit")
+def als_edit(ctx: Context, operations: list[dict], path: str | None = None,
+             save_first: bool = True, open_after: bool = True, user_prompt: str = "") -> str:
+    """
+    Edit the Live Set FILE for things the Live API cannot do, then reopen it in Live.
+    Flow: Cmd+S in Live -> edit a working copy '<Set> MCP.als' (original untouched;
+    an already-open MCP copy is backed up to Backup/) -> open it in Live (~10 s reload).
+    Batch all operations into ONE call to reload only once.
+
+    operations (tracks by exact/partial name or API index):
+    - {"op":"group","tracks":["A","B"],"name":"My Bus"}            create a group
+    - {"op":"ungroup","group":"My Bus"}                           dissolve (group devices are lost)
+    - {"op":"move","track":"A","before":"B"} | {"after":"B"}      reorder (a group moves with its content);
+      add "into_group":"My Bus" to move a track into a group
+    - {"op":"sidechain","track":"SubLab","device":"Compressor2"|index,"source":"Ghost","tap":"pre"|"post"|"mixer","enabled":true}
+    - {"op":"route_input","track":"Rumble","source":"01 KICK 2","tap":"pre"|"post"|"mixer"}
+    - {"op":"route_output","track":"A","to":"main"|"group"}
+    - {"op":"rename","track":"A","name":"New"}
+    """
+    try:
+        from MCP_Server import als_editor as A
+        return json.dumps(A.apply(operations, path=path, save_first=save_first, open_after=open_after),
+                          indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"als_edit: {e}")
+        return f"Error in als_edit: {e}"
+
+
+# ── fit_vocal (2026-10-14) ──────────────────────────────────────────────────
+_WARP_NAMES = {0: "Beats", 1: "Tones", 2: "Texture", 3: "Re-Pitch", 4: "Complex", 6: "Complex Pro"}
+
+
+def _resolve_track_index(ableton, track: str) -> tuple[int, str]:
+    """Track by exact name, then case-insensitive substring, or a plain index."""
+    n = ableton.send_command("get_session_info")["track_count"]
+    names = {}
+    for i in range(n):
+        try:
+            names[i] = ableton.send_command("get_track_info", {"track_index": i}).get("name", "")
+        except Exception:
+            names[i] = ""
+    if str(track).strip().lstrip("-").isdigit():
+        i = int(track)
+        return i, names.get(i, "")
+    for i, nm in names.items():
+        if nm == track:
+            return i, nm
+    hits = [(i, nm) for i, nm in names.items() if str(track).lower() in nm.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise ValueError(f"no track named '{track}'")
+    raise ValueError(f"'{track}' is ambiguous: {[nm for _, nm in hits]}")
+
+
+def _marker_bpm(markers) -> float | None:
+    """Source tempo implied by Live's warp markers (beats per minute of the file)."""
+    ms = [m for m in (markers or []) if m.get("sample_time") is not None]
+    if len(ms) < 2:
+        return None
+    # the very last marker is Live's hidden helper; use first + second-to-last when possible
+    a, b = ms[0], ms[-2] if len(ms) > 2 else ms[-1]
+    ds = b["sample_time"] - a["sample_time"]
+    if ds <= 0:
+        return None
+    return round((b["beat_time"] - a["beat_time"]) / ds * 60.0, 2)
+
+
+@mcp.tool()
+@rich_telemetry_tool("fit_vocal")
+def fit_vocal(
+    ctx: Context,
+    track: str,
+    clip_index: int | None = None,
+    arrangement_index: int | None = None,
+    target_key: str | None = None,
+    semitones: int | None = None,
+    max_shift: int = 5,
+    warp_mode: int = 6,
+    fine_tune: bool = True,
+    auto_shift: bool = True,
+    tune_strength: float = 0.7,
+    apply: bool = False,
+    user_prompt: str = ""
+) -> str:
+    """
+    Fit a vocal to the song: key (transpose + fine tuning), tempo (warp) and
+    optional real-time pitch correction with Live 12's Auto Shift.
+
+    Steps per clip: read the clip's audio file -> YIN pitch track -> detected
+    key + tuning offset (cents) -> pick the transpose (−max_shift..+max_shift)
+    that puts the most vocal energy on the target scale -> warping on with
+    Complex Pro (formant-preserving), so it follows the song tempo; Live's own
+    warp markers give the source BPM -> optionally load Auto Shift on the track
+    (Scale Aware = follows the song scale) at `tune_strength`.
+
+    DRY RUN by default: returns the plan. apply=true writes it. Uncertain key
+    detection (short/shouted vocals, two shifts nearly tied) is NOT transposed
+    automatically — pass `semitones` to decide, or listen first.
+
+    Parameters:
+    - track: track name (exact or unique part) or index
+    - clip_index: Session slot; arrangement_index: Arrangement clip. Neither = all audio clips on the track
+    - target_key: e.g. "F minor", "A# dorian". Default: Live 12's song scale (Scale button must be on)
+    - semitones: force this transpose instead of the detected one
+    - max_shift: largest transpose allowed (default 5; bigger shifts sound unnatural)
+    - warp_mode: 6 Complex Pro (default), 4 Complex, 1 Tones, 0 Beats
+    - fine_tune: correct the detected tuning offset via clip Detune (cents)
+    - auto_shift: load/configure Auto Shift on the track (Live 12.1+)
+    - tune_strength: Auto Shift Strength 0..1 (1 = hard robot tune; 0.6–0.8 natural)
+    - apply: false = plan only (default), true = write to Live
+    - user_prompt: The original user prompt that led to this tool call (for telemetry)
+    """
+    if not _AUDIO_OK:
+        return f"Error: audio analysis unavailable ({_AUDIO_IMPORT_ERROR})."
+    from . import vocal_fit as V
+    try:
+        ableton = get_ableton_connection()
+        ti, tname = _resolve_track_index(ableton, track)
+        report: Dict[str, Any] = {"track": tname, "track_index": ti, "applied": bool(apply)}
+
+        # ── target scale ────────────────────────────────────────────────
+        song_scale = {}
+        try:
+            song_scale = ableton.send_command("get_song_scale")
+        except Exception as e:
+            if "Unknown command" in str(e):
+                return ("Error: the Remote Script in Live is older than this server (no get_song_scale). "
+                        "Copy AbletonMCP_Remote_Script/__init__.py to "
+                        "~/Music/Ableton/User Library/Remote Scripts/AbletonMCP/ and restart Live.")
+            raise
+        song_tempo = song_scale.get("tempo") or ableton.send_command("get_session_info")["tempo"]
+        use_song_scale = False
+        if target_key:
+            root, intervals, label = V.parse_key(target_key)
+        elif song_scale.get("available") and song_scale.get("scale_intervals"):
+            root, intervals = song_scale["root_note"], song_scale["scale_intervals"]
+            label = f"{V.NOTE_NAMES[root]} {song_scale.get('scale_name', '')}".strip()
+            use_song_scale = True
+            if not song_scale.get("scale_mode"):
+                report["warning_scale"] = (f"Song scale is {label} but Live's Scale mode is OFF — "
+                                           "may just be the default. Pass target_key to be sure.")
+        else:
+            return ("Error: no target key. Pass target_key (e.g. 'F minor') — Live 11 has no song scale.")
+        report["target"] = {"key": label, "source": "target_key" if target_key else "Live song scale",
+                            "song_tempo": song_tempo}
+
+        # ── clips ───────────────────────────────────────────────────────
+        refs = []
+        if clip_index is not None:
+            refs.append({"clip_index": clip_index})
+        elif arrangement_index is not None:
+            refs.append({"arrangement_index": arrangement_index})
+        else:
+            arr = ableton.send_command("get_arrangement_clips", {"track_index": ti})
+            refs += [{"arrangement_index": k} for k, c in enumerate(arr.get("clips", [])) if c.get("is_audio_clip")]
+            ses = ableton.send_command("list_audio_clips")
+            refs += [{"clip_index": c["clip_index"]} for c in ses.get("clips", []) if c["track_index"] == ti]
+        if not refs:
+            return f"Error: no audio clips on track '{tname}'."
+
+        clips = []
+        for r in refs:
+            info = ableton.send_command("clip_props", {"track_index": ti, **r})
+            clips.append((r, info))
+
+        # ── analyse each distinct file once ─────────────────────────────
+        files: Dict[str, Any] = {}
+        for _, info in clips:
+            fp = info.get("file_path")
+            if not fp or fp in files:
+                continue
+            try:
+                a = V.analyze_vocal(fp)
+                hist = a.pop("_hist")
+                cands = [c for c in V.best_shift(hist, root, intervals, max_shift=6)
+                         if abs(c["semitones"]) <= max_shift]
+                top, second = cands[0], cands[1] if len(cands) > 1 else None
+                reasons = []
+                if a["voiced_seconds"] < 3.0:
+                    reasons.append(f"only {a['voiced_seconds']} s of pitched singing")
+                if second and top["in_scale"] - second["in_scale"] < 0.03:
+                    reasons.append(f"{top['semitones']:+d} and {second['semitones']:+d} st fit almost equally")
+                if top["in_scale"] < 0.75:
+                    reasons.append(f"best fit only {int(top['in_scale'] * 100)} % in scale")
+                tun = a["tuning_offset_cents"]
+                fine = -int(round(tun)) if (fine_tune and 8 <= abs(tun) <= 40) else 0
+                files[fp] = {"analysis": a, "shift_candidates": cands[:3], "uncertain": reasons,
+                             "chosen_semitones": semitones if semitones is not None else (None if reasons else top["semitones"]),
+                             "detune_cents": fine}
+            except Exception as e:
+                files[fp] = {"error": str(e), "chosen_semitones": semitones, "detune_cents": 0}
+        report["files"] = {os.path.basename(k): v for k, v in files.items()}
+
+        # ── per-clip plan / apply ───────────────────────────────────────
+        rows = []
+        for r, info in clips:
+            f = files.get(info.get("file_path"), {})
+            st = f.get("chosen_semitones")
+            new = {"warping": True, "warp_mode": warp_mode}
+            if st is not None:
+                new["pitch_coarse"] = int(st)
+                new["pitch_fine"] = f.get("detune_cents", 0)
+            row = {**r, "name": info.get("name"),
+                   "source_bpm": _marker_bpm(info.get("markers")),
+                   "was": {"warping": info.get("warping"), "warp_mode": _WARP_NAMES.get(info.get("warp_mode")),
+                           "pitch_coarse": info.get("pitch_coarse"), "pitch_fine": info.get("pitch_fine")},
+                   "set": {**new, "warp_mode": _WARP_NAMES.get(warp_mode, warp_mode)}}
+            if not info.get("warping"):
+                row["note"] = "was not warped — check Live's detected BPM (Seg. BPM) after warping"
+            if apply:
+                res = ableton.send_command("clip_props", {"track_index": ti, **r, **new})
+                row["now"] = {k: res.get(k) for k in ("warping", "warp_mode", "pitch_coarse", "pitch_fine")}
+            rows.append(row)
+        report["clips"] = rows
+        report["clip_count"] = len(rows)
+        report["not_transposed"] = sum(1 for x in rows if "pitch_coarse" not in x["set"])
+
+        # ── Auto Shift ──────────────────────────────────────────────────
+        if auto_shift:
+            t = ableton.send_command("get_track_info", {"track_index": ti})
+            devs = [d.get("name") for d in t.get("devices", [])]
+            plan = {"present": "Auto Shift" in devs,
+                    "mode": "Scale Aware (follows song scale)" if use_song_scale else f"Root/Scale = {label}",
+                    "strength": tune_strength}
+            if apply:
+                if "Auto Shift" not in devs:
+                    ableton.send_command("load_browser_item", {"track_index": ti, "item_uri": "query:AudioFx#Auto%20Shift"})
+                    t = ableton.send_command("get_track_info", {"track_index": ti})
+                    devs = [d.get("name") for d in t.get("devices", [])]
+                if "Auto Shift" not in devs:
+                    plan["error"] = "could not load Auto Shift (needs Live 12.1+)"
+                else:
+                    di = devs.index("Auto Shift")
+                    def setp(name, value):
+                        return ableton.send_command("set_device_parameter", {
+                            "track_index": ti, "device_index": di, "param_name": name, "value": value})
+                    setp("Strength", float(tune_strength))
+                    if use_song_scale:
+                        setp("Scale Aware", 1.0)
+                    else:
+                        setp("Scale Aware", 0.0)
+                        setp("Root", float(root))
+                        want = label.split(" ", 1)[1].lower()
+                        found = None
+                        for v in range(1, 37):
+                            setp("Scale", float(v))
+                            ps = ableton.send_command("get_device_parameters", {"track_index": ti, "device_index": di})
+                            disp = next((p["display_value"] for p in ps.get("parameters", []) if p["name"] == "Scale"), "")
+                            if disp.lower() == want:
+                                found = disp
+                                break
+                        plan["scale_set"] = found or f"'{want}' not in Auto Shift's list — set Scale by hand"
+                    plan["device_index"] = di
+                    if di != 0:
+                        plan["hint"] = ("Auto Shift sits after other devices; for cleanest tracking "
+                                        "drag it to the start of the chain (Live API cannot reorder).")
+            report["auto_shift"] = plan
+
+        if report["not_transposed"]:
+            report["next"] = ("Some clips were NOT transposed because the key detection is uncertain "
+                              "(see files[].uncertain). Listen, then rerun with semitones=<n>.")
+        return json.dumps(report, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"fit_vocal: {e}")
+        return f"Error in fit_vocal: {e}"
+
+
+# ── Locators (2026-10-15) ───────────────────────────────────────────────────
+@mcp.tool()
+@rich_telemetry_tool("set_locators")
+def set_locators(ctx: Context, locators: list[dict] | None = None, clear: bool = False,
+                 user_prompt: str = "") -> str:
+    """
+    Read or set Arrangement locators (the named markers above the timeline).
+
+    - locators: [{"bar": 1, "name": "Intro"}, ...] — bar is 1-based (4/4), or pass
+      "time" in beats instead. Existing locators at that position are renamed.
+      Omit to just list the current locators.
+    - clear: delete ALL existing locators first.
+    The playhead is restored afterwards.
+    """
+    try:
+        ableton = get_ableton_connection()
+        if locators is None and not clear:
+            return json.dumps(ableton.send_command("get_cue_points"), indent=2, ensure_ascii=False)
+        info = ableton.send_command("get_session_info")
+        pos = info.get("current_song_time", 0.0)
+        beats_per_bar = info.get("signature_numerator", 4)
+        done = []
+        if clear:
+            for q in ableton.send_command("get_cue_points").get("cue_points", []):
+                ableton.send_command("cue_point", {"time": q["time"], "delete": True})
+        for loc in locators or []:
+            t = float(loc["time"]) if "time" in loc else (float(loc["bar"]) - 1.0) * beats_per_bar
+            done.append(ableton.send_command("cue_point", {"time": t, "name": loc.get("name")}))
+        ableton.send_command("set_song_loop", {"song_time": pos})
+        return json.dumps({"set": done, "now": ableton.send_command("get_cue_points")["cue_points"]},
+                          indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"set_locators: {e}")
+        return f"Error in set_locators: {e}"
 
 
 # Main execution

@@ -63,3 +63,9 @@ MCP_Server/config.py
 
 # Telemetry anon id (defensive)
 customer_uuid.txt
+
+# Local backups, archives, test sets
+*.bak-*
+*.zip
+Claude testing Project/
+m4l/lek_debug.txt
